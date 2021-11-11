@@ -1,0 +1,222 @@
+---
+title: "Reconhecimento Ótico de Caracteres usando SVM"
+author: "Heitor Gabriel S. Monteiro"
+date: "22/10/2021"
+geometry: margin=1in
+fontfamily: mathpazo
+fontsize: 12pt
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+    highlight: tango
+  html_document:
+    highlight: tango
+    theme: cerulean
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Dados
+
+```{r, warning=FALSE, message=FALSE}
+setwd('/home/heitor/Área de Trabalho/R Projects/Análise Macro/Lab 10')
+
+library(tidyverse)
+library(tidymodels)
+library(workflowsets)
+library(kernlab)
+library(kableExtra)
+library(ggside)
+library(plotly)
+library(gridExtra)
+```
+
+
+Os [dados](https://archive.ics.uci.edu/ml/datasets/letter+recognition) são estatísticas de uso de *piexels* por letras do alfabeto com diferentes estilos.
+
+<center>
+
+![Exemplos de tipos de letras](image.png)
+
+</center>
+
+Ao exportar os dados e ter uma visão geral sobre as variáveis envolvidas, transformamos as letras em fatores:
+
+```{r, warning=FALSE, message=FALSE}
+dt <- read_csv("letterdata.csv") %>%
+	as_tibble()
+
+dt %>% glimpse()
+
+dt <- dt %>% mutate(letter = factor(letter))
+dt$letter %>% levels()
+
+dt %>% summary()
+```
+
+Vemos as médias e desvios-padrão da quantidade de pixels usados na imagem, média de piexels por linha e por coluna.
+
+```{r}
+dt1 <- dt %>% 
+	group_by(letter) %>%
+	summarise( Média_pix    = mean(onpix),
+			   Var_pix      = sd(onpix)  ,
+			   Média_Linha  = mean(xbar),
+			   Var_Linha    = sd(xbar)  ,
+			   Média_Col    = mean(ybar),
+			   Var_Col      = sd(ybar)  )
+dt1 %>% 
+	kable(#format = 'html',
+		  align = 'c',
+		  caption = 'Estatísticas Descritivas dos Pixels das Letras') %>% 
+	kable_styling(full_width = F,
+				  bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+```{r, fig.cap='Box-Plot do Uso de Pixels por Letras', fig.align='center', fig.width=9, fig.height=4}
+gg1 <- dt %>% 
+	ggplot(	)+
+	geom_boxplot(aes(y=onpix,
+					 x=letter,
+					 color=letter))+
+	theme(legend.position = "none")+
+	labs(title = 'Box-Plot do Uso de Pixels por Letras') +
+	ylab('Porcentagem de Pixels')
+
+ggplotly(gg1)
+```
+
+```{r, fig.align='center', fig.width=9, fig.height=6}
+gg2 <- dt1 %>%
+	ggplot() +
+	geom_density(aes(Média_pix)) +
+	labs(title = 'Densidade da Média de Uso de Pixels')
+gg3 <- dt1 %>%
+	ggplot() +
+	geom_density(aes(Média_Linha))+
+	labs(title = 'Densidade da Média de Uso Horizontal de Pixels')
+gg4 <- dt1 %>%
+	ggplot() +
+	geom_density(aes(Média_Col))+
+	labs(title = 'Densidade da Média de Uso Vertical de Pixels')
+grid.arrange(gg2, gg3, gg4)
+```
+
+Concluímos que as letras têm grupos de médias, com alta variabilidade entre elas. A variabilidade e a assimetria da distribuição podem ser espaços vetoriais adicionados para a de análise, corroborando o uso de um Kernel Linear. Ainda sim, como nosso propósido é classificar o caractere, treinaremos o modelo com vários Kernels e veremos qual se encaixa melhor no teste.
+
+# Separação dos dados:
+```{r, warning=FALSE, message=FALSE}
+slice_1 <- initial_split(dt)
+train   <- training(slice_1)
+test    <- testing(slice_1)
+```
+
+# Modelo
+
+Vamos criar a estrutura geral do nosso modelo, deixando espaços livres com `tune()` por serem os parâmetros a serem testados com vários kernels e vários parâmetros de custo, reiteragas vezes.
+
+```{r, warning=FALSE, message=FALSE}
+rbf_svm_algort <- svm_rbf(cost = tune(),
+					  rbf_sigma = tune()) %>% 
+	set_engine("kernlab") %>% 
+	set_mode("classification")
+```
+
+# Tratamentos e Fórmula para Alimentar o Modelo
+
+Defino como os dados alimentarão o modelo já descrito acima e aplico um tratamento de normalização nos dados, usando desvio da média e desvio-padrão.
+
+```{r, warning=FALSE, message=FALSE}
+recipe_svm <- 
+	recipe(letter ~ .,
+		   data = train) %>%
+	step_normalize(all_numeric_predictors()) %>% 
+	prep()
+```
+
+# Workflow
+
+Junto o modelo descrito e os dados tratados, formando um workflow:
+
+```{r, warning=FALSE, message=FALSE}
+wrkflw_1 <- workflow() %>%  
+	add_model(rbf_svm_algort) %>% 
+	add_recipe(recipe_svm)
+```
+
+# Validação Cruzada
+
+Defino a validação cruzada em grupos de cinco, ou seja, a amostra de treino será $\frac{4}{5}$ passando por várias reamostragens.
+
+```{r, warning=FALSE, message=FALSE}
+valid_1 <- vfold_cv(train, v = 5)
+```
+
+# Treinamento
+
+Como testar todas as combinações possíveis de parâmetros sobrecarregará a máquina, para fins de exercício, definirei um intervalo que o algoritmo deve procurar os melhores parâmetros:
+
+```{r, warning=FALSE, message=FALSE}
+start_grid_1 <-
+	wrkflw_1 %>% 
+	parameters() %>% 
+	update(
+		cost = cost(c(-1, 1)),
+		rbf_sigma = rbf_sigma(c(-2, 2))
+	) %>% 
+	grid_regular(levels = 1)
+```
+
+Treinaremos o modelo com vários parâmetros e selecionaremos de acordo com `roc_auc`: a área abaixo da [curva de ROC](https://en.wikipedia.org/wiki/Receiver_operating_characteristic), um gráfico usado para diagnosticar modelos de classificação binária em geral. Sempre lembrando que defini um intervalo específico, então, vamos mostrar um ótimo local.
+
+```{r, warning=FALSE, message=FALSE}
+trained_svm_1 <- 
+	wrkflw_1 %>% 
+	tune_grid(resamples = valid_1,
+			  grid = start_grid_1,
+			  metrics = metric_set(roc_auc))
+
+collect_metrics(trained_svm_1)
+trained_svm_1 %>% show_best(n=15)
+```
+
+# Testando
+
+Selecionaremos o melhor modelo, usando o `roc_auc`.
+
+```{r, warning=FALSE, message=FALSE}
+best_tune  <- select_best(trained_svm_1,
+						  'roc_auc',
+						  n=1)
+final_svm <- rbf_svm_algort %>%
+	finalize_model(best_tune)
+
+final_svm
+```
+
+Aplicaremos esse modelo, `final_svm` na partição feita em `slice_1` e com a organização dos dados de acordo com `recipe_svm`. Vemos que conseguimos 80,78% de acurácia do modelo.
+
+```{r, warning=FALSE, message=FALSE}
+final_svm_wrkflw <- workflow() %>% 
+	add_recipe(recipe_svm) %>% 
+	add_model(final_svm) %>% 
+	last_fit(slice_1) %>% 
+	collect_predictions()
+
+final_svm_wrkflw %>% count(letter==.pred_class)
+```
+
+
+
+
+
+
